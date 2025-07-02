@@ -267,7 +267,11 @@ auto vector_store::ann(keyspace_name keyspace, index_name name, schema_ptr schem
 
     if (resp_status != status_type::ok) {
         vslogger.error("Vector Store returned error: HTTP status {}: {}", resp_status, resp_content);
-        co_return std::unexpected{service_error{resp_status}};
+        sstring s;
+        for (auto&& buf: resp_content) {
+                s += seastar::to_sstring(std::move(buf));
+            };
+        co_return std::unexpected{service_error{resp_status, s}};
     }
 
     try {

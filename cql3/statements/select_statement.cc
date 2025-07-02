@@ -23,6 +23,7 @@
 #include <seastar/coroutine/exception.hh>
 #include "service/broadcast_tables/experimental/lang.hh"
 #include "service/qos/qos_common.hh"
+#include "service/vector_store.hh"
 #include "transport/messages/result_message.hh"
 #include "cql3/functions/as_json_function.hh"
 #include "cql3/selection/selection.hh"
@@ -41,6 +42,7 @@
 #include "service/storage_proxy.hh"
 #include <seastar/core/execution_stage.hh>
 #include <seastar/core/on_internal_error.hh>
+#include <variant>
 #include "view_info.hh"
 #include "partition_slice_builder.hh"
 #include "cql3/untyped_result_set.hh"
@@ -1157,6 +1159,29 @@ lw_shared_ptr<const service::pager::paging_state> indexed_table_select_statement
     return paging_state_copy;
 }
 
+struct error_visitor{
+    sstring operator()(const service::vector_store::disabled& ex) {
+        return "ANN query cannot be executed with vector_store disabled";
+    }
+
+    sstring operator()(const service::vector_store::addr_unavailable& ex) {
+        return "Could not resolve vector store address";
+    }
+
+    sstring operator()(const service::vector_store::service_unavailable& ex) {
+        return "Vector store service is unavailable";
+    }
+
+    sstring operator()(const service::vector_store::service_error& ex) {
+        return fmt::format("Vector store service error: {}", ex.content);
+    }
+
+    sstring operator()(const service::vector_store::service_reply_format_error& ex) {
+        return "Message received from vector store service is malformed";
+    }
+
+};
+
 future<shared_ptr<cql_transport::messages::result_message>>
 indexed_table_select_statement::do_execute(query_processor& qp,
                              service::query_state& state,
@@ -1196,7 +1221,9 @@ indexed_table_select_statement::do_execute(query_processor& qp,
         auto pkeys = co_await qp.vector_store().ann(_schema->ks_name(), _index.metadata().name(), _schema , std::move(ann_vector), limit);
         
         if (!pkeys.has_value()) {
-            co_await coroutine::return_exception(exceptions::invalid_request_exception(fmt::format("ANN query cannot be executed with vector_store disabled")));
+            auto ex = pkeys.error();
+            auto msg = std::visit(error_visitor{}, ex);
+            co_await coroutine::return_exception(exceptions::invalid_request_exception(msg));
         }
 
         // If there are no clustering columns, we have to convert the partition keys to partition ranges.

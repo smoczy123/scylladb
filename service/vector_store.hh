@@ -72,6 +72,7 @@ public:
     /// The error from the vector-store service.
     struct service_error {
         status_type status; ///< The HTTP status code from the vector-store service.
+        sstring content; ///< The content of the HTTP reply from the vector-store service.
     };
 
     /// An unsupported reply format from the vector-store service.
