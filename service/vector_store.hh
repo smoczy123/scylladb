@@ -8,7 +8,10 @@
 
 #pragma once
 
+#include "seastar/core/metrics_registration.hh"
 #include "seastarx.hh"
+#include "utils/estimated_histogram.hh"
+#include <cstdint>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/http/reply.hh>
@@ -59,6 +62,8 @@ private:
     inet_address _addr;                              ///< The address for the vector-store service.
     time_point _last_dns_refresh;                    ///< The last time the DNS service was refreshed to get the vector-store service address.
 
+    seastar::metrics::metric_groups _metrics; ///< The metrics for the vector-store service.
+
 public:
     /// The vector-store service is disabled.
     struct disabled {};
@@ -78,6 +83,18 @@ public:
     struct service_reply_format_error {};
 
     using ann_error = std::variant<disabled, addr_unavailable, service_unavailable, service_error, service_reply_format_error>;
+
+    struct stats {
+        uint64_t ann_requests = 0; ///< The number of ANN requests made to the vector-store service.
+        uint64_t ann_errors = 0;   ///< The number of errors encountered while making ANN requests.
+        uint64_t ann_success = 0;  ///< The number of successful ANN requests.
+        uint64_t ann_service_unavailable = 0; ///< The number of times the vector-store service was unavailable.
+        utils::estimated_histogram ann_limit_histogram{35}; ///< Histogram of the limits used in ANN requests.
+        utils::time_estimated_histogram ann_latencies; ///< Histogram of the latencies of ANN requests.
+        uint64_t dns_refreshes = 0; ///< The number of times the DNS service was refreshed to get the vector-store service address.
+    };
+
+    stats _stats; ///< The statistics for the vector-store service.
 
     explicit vector_store(config const& cfg);
     ~vector_store();

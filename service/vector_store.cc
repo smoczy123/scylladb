@@ -13,10 +13,12 @@
 #include "exceptions/exceptions.hh"
 #include "dht/i_partitioner.hh"
 #include "keys.hh"
+#include "utils/histogram_metrics_helper.hh"
 #include "utils/rjson.hh"
 #include "schema/schema.hh"
 #include <charconv>
 #include <regex>
+#include <seastar/core/metrics.hh>
 #include <seastar/http/client.hh>
 #include <seastar/http/request.hh>
 #include <seastar/net/dns.hh>
@@ -192,6 +194,15 @@ auto cleanup_old_clients(std::vector<lw_shared_ptr<client>>& clients) -> future<
 namespace service {
 
 vector_store::vector_store(config const& cfg) {
+    _metrics.add_group("vector_store", {
+        seastar::metrics::make_gauge("ann_requests", [this] { return _stats.ann_requests; }, seastar::metrics::description("Number of ANN requests made to the vector-store service.")),
+        seastar::metrics::make_gauge("ann_errors", [this] { return _stats.ann_errors; }, seastar::metrics::description("Number of errors encountered while making ANN requests.")),
+        seastar::metrics::make_gauge("ann_success", [this] { return _stats.ann_success; }, seastar::metrics::description("Number of successful ANN requests.")),
+        seastar::metrics::make_gauge("ann_service_unavailable", [this] { return _stats.ann_service_unavailable; }, seastar::metrics::description("Number of times the vector-store service was unavailable.")),
+        seastar::metrics::make_histogram("ann_limit_histogram", [this] { return estimated_histogram_to_metrics(_stats.ann_limit_histogram); }, seastar::metrics::description("Histogram of the limits used in ANN requests.")),
+        seastar::metrics::make_histogram("ann_latencies", [this] { return to_metrics_histogram(_stats.ann_latencies); }, seastar::metrics::description("Histogram of the latencies of ANN requests.")),
+        seastar::metrics::make_gauge("dns_refreshes", [this] { return _stats.dns_refreshes; }, seastar::metrics::description("Number of times the DNS service was refreshed to get the vector-store service address.")),
+    });
     auto config_uri = cfg.vector_store_uri();
     if (config_uri.empty()) {
         return;
@@ -203,6 +214,8 @@ vector_store::vector_store(config const& cfg) {
     }
 
     std::tie(_host, _port) = *parsed_uri;
+
+    
 }
 
 vector_store::~vector_store() = default;
@@ -223,6 +236,9 @@ auto vector_store::stop() -> future<> {
 
 auto vector_store::ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit)
         -> future<std::expected<primary_keys, ann_error>> {
+    _stats.ann_requests++;
+    _stats.ann_limit_histogram.add(limit);
+    auto start_time = lowres_system_clock::now();
     if (is_disabled()) {
         vslogger.error("Disabled Vector Store while calling ann");
         co_return std::unexpected{disabled{}};
@@ -256,6 +272,7 @@ auto vector_store::ann(keyspace_name keyspace, index_name name, schema_ptr schem
             exception_txt = e.what();
         }
         if (!retry) {
+            _stats.ann_service_unavailable++;
             vslogger.error("Vector Store service unavailable: {}", exception_txt);
             co_return std::unexpected{service_unavailable{}};
         }
@@ -266,13 +283,19 @@ auto vector_store::ann(keyspace_name keyspace, index_name name, schema_ptr schem
     }
 
     if (resp_status != status_type::ok) {
+        _stats.ann_errors++;
         vslogger.error("Vector Store returned error: HTTP status {}: {}", resp_status, resp_content);
         co_return std::unexpected{service_error{resp_status}};
     }
 
     try {
-        co_return read_ann_json(rjson::parse(std::move(resp_content)), schema);
+        auto resp = read_ann_json(rjson::parse(std::move(resp_content)), schema);
+        _stats.ann_success++;
+        auto latency = lowres_system_clock::now() - start_time;
+        _stats.ann_latencies.add(latency);
+        co_return resp;
     } catch (const rjson::error& e) {
+        _stats.ann_errors++;
         vslogger.error("Vector Store returned invalid JSON: {}", e.what());
         co_return std::unexpected{service_reply_format_error{}};
     }
@@ -293,6 +316,7 @@ auto vector_store::refresh_service_addr() -> future<bool> {
     }
 
     _last_dns_refresh = lowres_system_clock::now();
+    _stats.dns_refreshes++;
     auto addr = inet_address{};
     try {
         addr = co_await net::dns::resolve_name(_host);
