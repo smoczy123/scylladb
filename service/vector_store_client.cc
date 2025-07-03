@@ -14,12 +14,14 @@
 #include "utils/sequential_producer.hh"
 #include "dht/i_partitioner.hh"
 #include "keys.hh"
+#include "utils/histogram_metrics_helper.hh"
 #include "utils/rjson.hh"
 #include "schema/schema.hh"
 #include <charconv>
 #include <exception>
 #include <fmt/ranges.h>
 #include <regex>
+#include <seastar/core/metrics.hh>
 #include <seastar/coroutine/as_future.hh>
 #include <seastar/coroutine/exception.hh>
 #include <seastar/http/client.hh>
@@ -435,6 +437,15 @@ struct vector_store_client::impl {
 };
 
 vector_store_client::vector_store_client(config const& cfg) {
+    _metrics.add_group("vector_store", {
+        seastar::metrics::make_gauge("ann_requests", [this] { return _stats.ann_requests; }, seastar::metrics::description("Number of ANN requests made to the vector-store service.")),
+        seastar::metrics::make_gauge("ann_errors", [this] { return _stats.ann_errors; }, seastar::metrics::description("Number of errors encountered while making ANN requests.")),
+        seastar::metrics::make_gauge("ann_success", [this] { return _stats.ann_success; }, seastar::metrics::description("Number of successful ANN requests.")),
+        seastar::metrics::make_gauge("ann_service_unavailable", [this] { return _stats.ann_service_unavailable; }, seastar::metrics::description("Number of times the vector-store service was unavailable.")),
+        seastar::metrics::make_histogram("ann_limit_histogram", [this] { return estimated_histogram_to_metrics(_stats.ann_limit_histogram); }, seastar::metrics::description("Histogram of the limits used in ANN requests.")),
+        seastar::metrics::make_histogram("ann_latencies", [this] { return to_metrics_histogram(_stats.ann_latencies); }, seastar::metrics::description("Histogram of the latencies of ANN requests.")),
+        seastar::metrics::make_gauge("dns_refreshes", [this] { return _stats.dns_refreshes; }, seastar::metrics::description("Number of times the DNS service was refreshed to get the vector-store service address.")),
+    });
     auto config_uri = cfg.vector_store_uri();
     if (config_uri.empty()) {
         vslogger.info("Vector Store service URI is not configured.");
@@ -492,6 +503,10 @@ auto vector_store_client::port() const -> std::expected<port_number, disabled> {
 
 auto vector_store_client::ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit, abort_source& as)
         -> future<std::expected<primary_keys, ann_error>> {
+    _stats.ann_requests++;
+    _stats.ann_limit_histogram.add(limit);
+    auto start_time = lowres_system_clock::now();
+    
     if (is_disabled()) {
         vslogger.error("Disabled Vector Store while calling ann");
         co_return std::unexpected{disabled{}};
@@ -502,6 +517,7 @@ auto vector_store_client::ann(keyspace_name keyspace, index_name name, schema_pt
 
     auto resp = co_await _impl->make_request(operation_type::POST, std::move(path), std::move(content), as);
     if (!resp) {
+        _stats.ann_service_unavailable++;
         co_return std::unexpected{std::visit(
                 [](auto&& err) {
                     return ann_error{err};
@@ -510,13 +526,19 @@ auto vector_store_client::ann(keyspace_name keyspace, index_name name, schema_pt
     }
 
     if (resp->status != status_type::ok) {
+        _stats.ann_errors++;
         vslogger.error("Vector Store returned error: HTTP status {}: {}", resp->status, resp->content);
         co_return std::unexpected{service_error{resp->status}};
     }
 
     try {
-        co_return read_ann_json(rjson::parse(std::move(resp->content)), schema);
+        auto response = read_ann_json(rjson::parse(std::move(resp->content)), schema);
+        _stats.ann_success++;
+        auto latency = lowres_system_clock::now() - start_time;
+        _stats.ann_latencies.add(latency);
+        co_return response;
     } catch (const rjson::error& e) {
+        _stats.ann_errors++;
         vslogger.error("Vector Store returned invalid JSON: {}", e.what());
         co_return std::unexpected{service_reply_format_error{}};
     }

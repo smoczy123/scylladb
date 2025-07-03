@@ -9,6 +9,9 @@
 #pragma once
 
 #include "seastarx.hh"
+#include "utils/estimated_histogram.hh"
+#include <cstdint>
+#include <seastar/core/metrics_registration.hh>
 #include <seastar/core/shared_future.hh>
 #include <seastar/core/shared_ptr.hh>
 #include <seastar/http/reply.hh>
@@ -94,8 +97,22 @@ public:
     auto ann(keyspace_name keyspace, index_name name, schema_ptr schema, embedding embedding, limit limit, abort_source& as)
             -> future<std::expected<primary_keys, ann_error>>;
 
+    
+    struct stats {
+        uint64_t ann_requests = 0; ///< The number of ANN requests made to the vector-store service.
+        uint64_t ann_errors = 0;   ///< The number of errors encountered while making ANN requests.
+        uint64_t ann_success = 0;  ///< The number of successful ANN requests.
+        uint64_t ann_service_unavailable = 0; ///< The number of times the vector-store service was unavailable.
+        utils::estimated_histogram ann_limit_histogram{35}; ///< Histogram of the limits used in ANN requests.
+        utils::time_estimated_histogram ann_latencies; ///< Histogram of the latencies of ANN requests.
+        uint64_t dns_refreshes = 0; ///< The number of times the DNS service was refreshed to get the vector-store service address.
+    };
+
+    stats _stats; ///< The statistics for the vector-store service.
+
 private:
     friend struct vector_store_client_tester;
+    seastar::metrics::metric_groups _metrics; ///< The metrics for the vector-store service.
 };
 
 /// A tester for the vector_store_client, used for testing purposes.
