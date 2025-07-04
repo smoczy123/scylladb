@@ -12,6 +12,7 @@
 #include "cql3/description.hh"
 #include "db/tablet_options.hh"
 #include "db/view/view.hh"
+#include "index/secondary_index.hh"
 #include "timestamp.hh"
 #include "utils/assert.hh"
 #include "utils/UUID_gen.hh"
@@ -1683,6 +1684,21 @@ bool schema::has_vector_index() const {
         }
         return false;
     });
+}
+
+std::unordered_set<sstring>
+schema::get_vector_indexed_columns() const {
+    auto idx = this->indices();
+    std::unordered_set<sstring> vector_indexed_columns;
+    for (const auto& i : idx) {
+        auto custom_class = i.options().find(db::index::secondary_index::custom_index_option_name);
+        if (custom_class != i.options().end() && custom_class->second == "vector_index") {
+                sstring index_target = i.options().at(cql3::statements::index_target::target_option_name);
+                sstring index_target_name = secondary_index::target_parser::get_target_column_name_from_string(index_target);
+                vector_indexed_columns.insert(index_target_name);
+        } 
+    }
+    return vector_indexed_columns;
 }
 
 const ::tombstone_gc_options& schema::tombstone_gc_options() const {
