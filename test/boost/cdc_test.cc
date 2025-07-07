@@ -482,16 +482,10 @@ SEASTAR_THREAD_TEST_CASE(test_vsc_log_schema) {
         assert_does_not_have_column(cdc::log_data_column_deleted_name("ck"));
         assert_does_not_have_column(cdc::log_data_column_deleted_elements_name("ck"));
 
-        // TODO: Ideally, we would like to have only indexed vector columns in the vsc log table,
-        // but currently we have to log all columns as for the cdc log table.
-        assert_has_column(cdc::log_data_column_name("c"), int32_type);
-        assert_has_column(cdc::log_data_column_deleted_name("c"), boolean_type);
-        assert_does_not_have_column(cdc::log_data_column_deleted_elements_name("c"));
-
         // clustering row, atomic
-        // assert_does_not_have_column(cdc::log_data_column_name("c"));
-        // assert_does_not_have_column(cdc::log_data_column_deleted_name("c"));
-        // assert_does_not_have_column(cdc::log_data_column_deleted_elements_name("c"));
+        assert_does_not_have_column(cdc::log_data_column_name("c"));
+        assert_does_not_have_column(cdc::log_data_column_deleted_name("c"));
+        assert_does_not_have_column(cdc::log_data_column_deleted_elements_name("c"));
 
         // clustering row, vector
         assert_has_column(cdc::log_data_column_name("c_vec"), vector_type_impl::get_instance(float_type, 3));
